@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Un camino sin fin de girasoles</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;1,500;1,600&family=Montserrat:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; background: #150a05; }
+
+  /* Este div invisible NO dibuja nada: solo le da altura a la página
+     para que exista un scroll. Su alto se define desde JS (CONFIG.scrollScreens). */
+  #scroller { width: 1px; }
+
+  /* El canvas queda fijo: lo que se mueve no es la página, es la escena. */
+  #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+  /* ---------- Tarjeta de la dedicatoria ---------- */
+  #card {
+    position: fixed; left: 50%; top: 50%;
+    width: min(502px, 88vw);
+    box-sizing: border-box;
+    padding: clamp(28px, 5vh, 46px) clamp(22px, 4vw, 40px);
+    transform: translate(-50%, calc(-50% + var(--dy, 16px)));
+    background: rgba(38, 24, 11, .84);
+    border: 1px solid rgba(255, 205, 130, .28);
+    border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, .45);
+    -webkit-backdrop-filter: blur(3px);
+    backdrop-filter: blur(3px);
+    text-align: center;
+    opacity: 0;
+    pointer-events: none;
+  }
+  #card-date {
+    margin: 0 0 18px;
+    font: 500 13px 'Montserrat', sans-serif;
+    letter-spacing: .32em; text-indent: .32em; text-transform: uppercase;
+    color: #d6a56a;
+  }
+  #card-title {
+    margin: 0 0 20px;
+    font: italic 500 clamp(34px, 5.4vw, 48px)/1.12 'Cormorant Garamond', Georgia, serif;
+    color: #ffe6b5;
+  }
+  #card-body {
+    margin: 0 0 24px;
+    font: 500 clamp(18px, 2.5vw, 23px)/1.7 'Cormorant Garamond', Georgia, serif;
+    color: #fbe9d2;
+  }
+  #card-sign {
+    margin: 0;
+    font: italic 500 19px 'Cormorant Garamond', Georgia, serif;
+    color: #d9a86a;
+  }
+
+  /* ---------- Pista inicial ---------- */
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: 9%;
+    text-align: center; pointer-events: none;
+    font: 500 11px 'Montserrat', sans-serif;
+    letter-spacing: .38em; text-indent: .38em; text-transform: uppercase;
+    color: rgba(255, 236, 205, .78);
+  }
+  #hint span {
+    display: block; margin-top: 14px; font-size: 14px; letter-spacing: 0; text-indent: 0;
+    animation: bob 1.8s ease-in-out infinite;
+  }
+  @keyframes bob {
+    0%, 100% { transform: translateY(0);   opacity: .5; }
+    50%      { transform: translateY(6px); opacity: 1;  }
+  }
+  @media (prefers-reduced-motion: reduce) { #hint span { animation: none; } }
+  #watermark {
+  position: fixed; right: 14px; bottom: 12px;
+  font: 500 11px 'Montserrat', sans-serif;
+  letter-spacing: .08em;
+  color: rgba(255, 236, 205, .45);
+  pointer-events: none;
+}
+</style>
+</head>
+<body>
+
+<canvas id="scene"></canvas>
+
+<div id="card" role="article">
+  <p id="card-date"></p>
+  <h1 id="card-title"></h1>
+  <p id="card-body"></p>
+  <p id="card-sign"></p>
+</div>
+
+<div id="hint">Desliza para caminar entre los girasoles<span>v</span></div>
+<!-- Marca de agua personal, sutil, esquina inferior derecha -->
+<div id="watermark">by: @tobiasinda</div>
+<div id="scroller"></div>
+
+<script>
+(() => {
+'use strict';
+
+/* =====================================================================
+   1. CONFIGURACIÓN — todo lo que querrás retocar está acá arriba
+   ===================================================================== */
+const CONFIG = {
+  // Texto de la tarjeta
+  dedication: {
+    date: '21 de septiembre',
+    title: 'Un camino sin fin de girasoles.',
+    lines: [
+      'Hoy te regalo unas flores amarillas de una forma distinta…',
+      'No serán las mejores… No serán las más lindas…',
+      'Pero eso no importa, porque al final del día, la flor más bonita eres tú.',
+    ],
+    signature: '— feliz día, Adrid',
+  },
+
+  // Scroll
+  scrollScreens: 7,     // largo del recorrido, medido en "pantallas" de scroll
+  smoothing: 7,         // más alto = el avance responde más rápido al scroll
+
+  // Fases del recorrido (0 = inicio, 1 = final del scroll)
+  fieldEnd: 0.88,       // hasta acá se camina por el campo; después ya no hay flores
+  cardStart: 0.90,      // la tarjeta empieza a aparecer
+  cardEnd: 0.97,        // la tarjeta ya está completa
+
+  // Mundo 3D falso (las unidades son "metros" imaginarios)
+  travel: 90,           // cuánto camina la cámara en total
+  camHeight: 1.9,       // altura de la cámara sobre el suelo
+  focal: 1.0,           // "zoom" de la cámara (relativo al alto de la pantalla)
+  far: 55,              // más lejos que esto no se dibuja
+  near: 0.35,           // más cerca que esto ya no se dibuja
+  nearFade: 1.6,        // entre near y esto, la flor se vuelve translúcida
+  pathHalfWidth: 1.0,   // mitad del ancho del camino vacío del medio
+  fieldSpread: 10,      // hasta qué tan lejos del camino hay flores
+  rowSpacing: [0.45, 0.8], // distancia entre "filas" de flores
+  seed: 21,             // cambiando esto cambia la distribución de las flores
+
+  // Girasol grande del fondo (radio en fracción del alto de pantalla)
+  heroStart: 0.05,
+  heroEnd: 0.56,
+
+  particles: 80,        // motitas de polen flotando
+};
+
+/* =====================================================================
+   2. UTILIDADES
+   ===================================================================== */
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const smoothstep = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+
+// Random con semilla: siempre da la misma secuencia, así el campo es idéntico en cada carga.
+function mulberry32(a) {
+  return () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function makeCanvas(w, h) {
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w));
+  c.height = Math.max(1, Math.round(h));
+  return c;
+}
+
+/* =====================================================================
+   3. DIBUJO DE UN GIRASOL (se hace UNA sola vez, en un canvas aparte)
+   ===================================================================== */
+
+// Una hoja: forma con dos curvas de Bézier + nervadura.
+function drawLeaf(g, x, y, dir, len, wid, ang) {
+  g.save();
+  g.translate(x, y);
+  g.scale(dir, 1);          // dir = -1 espeja la hoja hacia la izquierda
+  g.rotate(-ang);           // ángulo hacia arriba
+  const grad = g.createLinearGradient(0, -wid, len, wid * .3);
+  grad.addColorStop(0, '#5fb04b');
+  grad.addColorStop(1, '#1f5a26');
+  g.fillStyle = grad;
+  g.beginPath();
+  g.moveTo(0, 0);
+  g.bezierCurveTo(len * .25, -wid * 1.1, len * .7, -wid * .9, len, 0);
+  g.bezierCurveTo(len * .7, wid * .7, len * .25, wid * .6, 0, 0);
+  g.fill();
+  g.strokeStyle = 'rgba(15, 55, 20, .45)';
+  g.lineWidth = Math.max(1, wid * .05);
+  g.beginPath();
+  g.moveTo(0, 0);
+  g.quadraticCurveTo(len * .5, -wid * .1, len * .92, 0);
+  g.stroke();
+  g.restore();
+}
+
+function drawStem(g, hx, hy, totalH, r, rand, withLeaves = true) {
+  const sw = Math.max(2, r * .13);
+  const grad = g.createLinearGradient(hx - sw / 2, 0, hx + sw / 2, 0);
+  grad.addColorStop(0, '#24582a');
+  grad.addColorStop(.5, '#4a9a3f');
+  grad.addColorStop(1, '#24582a');
+  g.fillStyle = grad;
+  g.fillRect(hx - sw / 2, hy, sw, totalH - hy);
+
+  if (!withLeaves) return;
+
+  // 2 o 3 hojas repartidas a lo largo del tallo, alternando lados
+  const stemLen = totalH - hy;
+  const fracs = rand() < .5 ? [.32, .58] : [.28, .52, .76];
+  let side = rand() < .5 ? 1 : -1;
+  for (const f of fracs) {
+    drawLeaf(g, hx, hy + stemLen * f, side, r * (.75 + rand() * .2), r * .32, .45 + rand() * .3);
+    side *= -1;
+  }
+}
+
+// Un anillo de pétalos: elipses rotadas alrededor del centro.
+function petalRing(g, o, rand) {
+  const grad = g.createLinearGradient(o.rIn, 0, o.rOut, 0);
+  o.stops.forEach(([p, c]) => grad.addColorStop(p, c));
+  g.fillStyle = grad;
+  g.strokeStyle = 'rgba(190, 95, 0, .32)';
+  g.lineWidth = Math.max(.75, o.hw * .09);
+  for (let i = 0; i < o.count; i++) {
+    const a = o.offset + (i / o.count) * Math.PI * 2 + (rand() - .5) * .06;
+    const out = o.rIn + (o.rOut - o.rIn) * (1 + (rand() - .5) * o.jitter);
+    g.save();
+    g.rotate(a);                        // el pétalo se dibuja apuntando a +x y se gira
+    g.beginPath();
+    g.ellipse((o.rIn + out) / 2, 0, (out - o.rIn) / 2, o.hw, 0, 0, Math.PI * 2);
+    g.fill();
+    g.stroke();
+    g.restore();
+  }
+}
+
+function drawHead(g, hx, hy, r, count, rand) {
+  const size = hx * 2;                   // canvas cuadrado auxiliar solo para la cabeza
+  const hc = makeCanvas(size, size);
+  const h = hc.getContext('2d');
+  h.translate(size / 2, size / 2);       // origen (0,0) = centro de la flor
+
+  // Tres capas de pétalos: la de atrás (oscura), la del medio (desfasada) y la interna (clara)
+  petalRing(h, { count, offset: 0, rIn: .30 * r, rOut: 1.02 * r, hw: .19 * r, jitter: .10,
+    stops: [[0, '#d9800c'], [.6, '#f2a11a'], [1, '#e8890d']] }, rand);
+  petalRing(h, { count, offset: Math.PI / count, rIn: .34 * r, rOut: .88 * r, hw: .17 * r, jitter: .08,
+    stops: [[0, '#ffc72c'], [.55, '#fbb424'], [1, '#f19412']] }, rand);
+  petalRing(h, { count, offset: 0, rIn: .38 * r, rOut: .70 * r, hw: .14 * r, jitter: .06,
+    stops: [[0, '#ffd84a'], [1, '#fbb724']] }, rand);
+
+  // Brillo cálido al centro: 'source-atop' pinta SOLO donde ya hay pétalos.
+  h.globalCompositeOperation = 'source-atop';
+  const glow = h.createRadialGradient(0, 0, r * .2, 0, 0, r * 1.05);
+  glow.addColorStop(0, 'rgba(255, 236, 110, .95)');
+  glow.addColorStop(.55, 'rgba(255, 205, 60, .45)');
+  glow.addColorStop(1, 'rgba(255, 150, 10, 0)');
+  h.fillStyle = glow;
+  h.fillRect(-size / 2, -size / 2, size, size);
+  h.globalCompositeOperation = 'source-over';
+
+  // Disco central marrón con borde dorado, anillo y reflejo
+  const d = r * .5;
+  h.fillStyle = '#b9852f';
+  h.beginPath(); h.arc(0, 0, d, 0, Math.PI * 2); h.fill();
+  const disc = h.createRadialGradient(-d * .25, -d * .3, d * .05, 0, 0, d * .93);
+  disc.addColorStop(0, '#8a5220');
+  disc.addColorStop(.55, '#5a3010');
+  disc.addColorStop(1, '#341a08');
+  h.fillStyle = disc;
+  h.beginPath(); h.arc(0, 0, d * .93, 0, Math.PI * 2); h.fill();
+  h.strokeStyle = 'rgba(255, 214, 150, .30)';
+  h.lineWidth = d * .08;
+  h.beginPath(); h.arc(0, 0, d * .55, 0, Math.PI * 2); h.stroke();
+  h.fillStyle = 'rgba(255, 255, 255, .30)';
+  h.beginPath(); h.ellipse(-d * .38, -d * .42, d * .24, d * .18, -.6, 0, Math.PI * 2); h.fill();
+
+  g.drawImage(hc, hx - size / 2, hy - size / 2);
+}
+
+// Mipmaps: versiones del sprite a 1/2, 1/4, 1/8... Reducir un sprite enorme a 10px
+// en cada frame es lento y se ve mal; usar una versión ya achicada es rápido y nítido.
+function buildMips(c) {
+  const levels = [c];
+  let cur = c;
+  while (cur.width > 12) {
+    const n = makeCanvas(Math.ceil(cur.width / 2), Math.ceil(cur.height / 2));
+    const g = n.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(cur, 0, 0, n.width, n.height);
+    levels.push(n);
+    cur = n;
+  }
+  return levels;
+}
+
+/* R = radio de la cabeza (unidades del mundo), stemLen = largo del tallo,
+   ppu = píxeles por unidad con los que se dibuja el sprite (resolución). */
+function createSprite({ R, stemLen, ppu, petals, seed, leaves = true }) {
+  const rand = mulberry32(seed);
+  const r = R * ppu;
+  const hx = Math.ceil(r * 1.12);        // mitad del ancho; también margen superior
+  const hy = hx;                         // centro de la cabeza (px dentro del sprite)
+  const w = hx * 2;
+  const h = hy + Math.ceil(stemLen * ppu);
+  const c = makeCanvas(w, h);
+  const g = c.getContext('2d');
+  drawStem(g, hx, hy, h, r, rand, leaves);
+  drawHead(g, hx, hy, r, petals, rand);
+  return { levels: buildMips(c), w, h, ppu, headX: hx, headY: hy, stemLen };
+}
+
+/* =====================================================================
+   4. ESTADO GLOBAL Y ELEMENTOS
+   ===================================================================== */
+const canvas = document.getElementById('scene');
+const ctx = canvas.getContext('2d', { alpha: false });
+const scroller = document.getElementById('scroller');
+const card = document.getElementById('card');
+const hint = document.getElementById('hint');
+
+let W, H, dpr, cx, horizon, F, base, xSqueeze;
+let bg, vignette;
+
+// Textos de la tarjeta
+(() => {
+  const D = CONFIG.dedication;
+  document.getElementById('card-date').textContent = D.date;
+  document.getElementById('card-title').textContent = D.title;
+  document.getElementById('card-sign').textContent = D.signature;
+  const body = document.getElementById('card-body');
+  D.lines.forEach((line, i) => {
+    if (i) body.appendChild(document.createElement('br'));
+    body.appendChild(document.createTextNode(line));
+  });
+  scroller.style.height = (CONFIG.scrollScreens * 100) + 'vh';
+})();
+
+/* =====================================================================
+   5. SPRITES Y CAMPO DE FLORES
+   ===================================================================== */
+const SPRITES = [
+  { R: .45, stemLen: 1.05, petals: 18, seed: 11 },
+  { R: .40, stemLen: 0.90, petals: 16, seed: 23 },
+  { R: .50, stemLen: 1.20, petals: 19, seed: 37 },
+  { R: .42, stemLen: 1.00, petals: 17, seed: 41 },
+  { R: .47, stemLen: 1.10, petals: 18, seed: 59 },
+  { R: .38, stemLen: 0.85, petals: 15, seed: 73 },
+].map(o => createSprite({ ...o, ppu: 420 }));
+
+// El girasol grande: su cabeza está a la altura de la cámara, por eso queda en el horizonte.
+const HERO_R = 1;
+const heroSprite = createSprite({ R: HERO_R, stemLen: CONFIG.camHeight, ppu: 470, petals: 20, seed: 7, leaves: false });
+
+function buildField() {
+  const rand = mulberry32(CONFIG.seed);
+  const list = [];
+  const [minGap, maxGap] = CONFIG.rowSpacing;
+  let z = 3;
+  while (z < CONFIG.travel - 0.3) {
+    for (const side of [-1, 1]) {
+      const n = 1 + (rand() < .6 ? 1 : 0);
+      for (let k = 0; k < n; k++) {
+        list.push({
+          x: side * (CONFIG.pathHalfWidth + Math.pow(rand(), 1.6) * CONFIG.fieldSpread),
+          z: clamp(z + (rand() - .5) * .8, 2.5, CONFIG.travel - 0.3),
+          v: Math.floor(rand() * SPRITES.length),   // qué sprite usa
+          sc: .85 + rand() * .4,                    // variación de tamaño
+        });
+      }
+    }
+    z += lerp(minGap, maxGap, rand());
+  }
+  list.sort((a, b) => b.z - a.z);       // de lejos a cerca: el orden de pintado (algoritmo del pintor)
+  return list;
+}
+const flowers = buildField();
+
+/* Polen / luciérnagas */
+const prand = mulberry32(99);
+const particles = Array.from({ length: CONFIG.particles }, () => ({
+  x: prand(), y: prand(), r: .6 + prand() * 1.8, ph: prand() * 6.28, sp: .004 + prand() * .012,
+}));
+
+/* =====================================================================
+   6. FONDO ESTÁTICO (cielo, sol, suelo) — se pinta una vez y se reutiliza
+   ===================================================================== */
+function buildBackground() {
+  bg = makeCanvas(W * dpr, H * dpr);
+  const b = bg.getContext('2d');
+  b.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // Cielo
+  const sky = b.createLinearGradient(0, 0, 0, horizon);
+  sky.addColorStop(0,   '#291644');
+  sky.addColorStop(.35, '#3f2158');
+  sky.addColorStop(.55, '#4f2a64');
+  sky.addColorStop(.83, '#8c3669');
+  sky.addColorStop(.94, '#c25b6e');
+  sky.addColorStop(1,   '#e8986f');
+  b.fillStyle = sky;
+  b.fillRect(0, 0, W, horizon);
+
+  // Sol sutil en el centro del horizonte (el suelo tapa su mitad de abajo)
+  const halo = b.createRadialGradient(cx, horizon, 0, cx, horizon, H * .6);
+  halo.addColorStop(0, 'rgba(255, 170, 90, .35)');
+  halo.addColorStop(1, 'rgba(255, 130, 90, 0)');
+  b.fillStyle = halo;
+  b.fillRect(0, 0, W, horizon);
+  const sunR = H * .2;
+  const sun = b.createRadialGradient(cx, horizon, 0, cx, horizon, sunR);
+  sun.addColorStop(0,   'rgba(255, 244, 190, 1)');
+  sun.addColorStop(.45, 'rgba(255, 214, 110, .98)');
+  sun.addColorStop(.85, 'rgba(255, 170, 80, .85)');
+  sun.addColorStop(1,   'rgba(240, 130, 90, 0)');
+  b.fillStyle = sun;
+  b.beginPath(); b.arc(cx, horizon, sunR, 0, Math.PI * 2); b.fill();
+
+  // Suelo
+  const ground = b.createLinearGradient(0, horizon, 0, H);
+  ground.addColorStop(0,   '#d8a45e');
+  ground.addColorStop(.10, '#8f5b27');
+  ground.addColorStop(.22, '#5d391b');
+  ground.addColorStop(.60, '#2b160b');
+  ground.addColorStop(1,   '#170a06');
+  b.fillStyle = ground;
+  b.fillRect(0, horizon, W, H - horizon);
+
+  // Surcos que convergen en el punto de fuga
+  b.strokeStyle = 'rgba(255, 196, 120, .05)';
+  b.lineWidth = 1.2;
+  for (let i = -24; i <= 24; i++) {
+    b.beginPath();
+    b.moveTo(cx, horizon);
+    b.lineTo(cx + i * W * .06, H);
+    b.stroke();
+  }
+}
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);   // desde acá dibujamos en píxeles CSS
+
+  cx = W / 2;
+  horizon = H * .47;
+  F = H * CONFIG.focal;                     // distancia focal en px
+  base = Math.min(H, W * 1.1);              // referencia de tamaño (que en celular no se pase)
+  xSqueeze = Math.min(1, (W / H) / 1.2);    // en pantallas angostas, acerca las flores al centro
+
+  buildBackground();
+
+  vignette = ctx.createRadialGradient(cx, H / 2, Math.min(W, H) * .45, cx, H / 2, Math.max(W, H) * .8);
+  vignette.addColorStop(0, 'rgba(10, 4, 14, 0)');
+  vignette.addColorStop(1, 'rgba(10, 4, 14, .38)');
+}
+
+/* =====================================================================
+   7. DIBUJO DE CADA FRAME
+   ===================================================================== */
+
+// Elige la versión (mipmap) del sprite que más se acerca al tamaño final.
+function pickLevel(spr, targetPx) {
+  const ratio = Math.max(spr.w / Math.max(targetPx, 1), 1);
+  return Math.min(Math.floor(Math.log2(ratio)), spr.levels.length - 1);
+}
+
+/* s = píxeles por unidad del mundo a esta distancia (así funciona la perspectiva).
+   (headX, headY) = dónde cae el centro de la cabeza en pantalla. */
+function drawSprite(spr, headX, headY, s, alpha) {
+  const k = s / spr.ppu;                     // factor de escala del sprite
+  const dw = spr.w * k, dh = spr.h * k;
+  if (dw < 2 || alpha < .02) return;
+  const x = headX - spr.headX * k;
+  const y = headY - spr.headY * k;
+  if (x > W || x + dw < 0 || y > H || y + dh < 0) return;   // fuera de pantalla
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(spr.levels[pickLevel(spr, dw * dpr)], x, y, dw, dh);
+}
+
+// Franjas oscuras en el suelo que se acercan: dan la sensación de estar caminando.
+function drawGroundBands(camZ) {
+  const band = 1.6;
+  const first = Math.floor(camZ / band);
+  ctx.fillStyle = '#000';
+  for (let i = 0; i < 40; i++) {
+    const idx = first + i;
+    if (idx % 2) continue;
+    const z0 = idx * band, z1 = z0 + band;
+    const d0 = Math.max(z0 - camZ, .25), d1 = z1 - camZ;
+    if (d1 <= .25) continue;
+    const a = .10 * clamp(1 - d0 / 32, 0, 1);
+    if (a < .002) continue;
+    const y0 = horizon + CONFIG.camHeight * F / d0;
+    const y1 = horizon + CONFIG.camHeight * F / d1;
+    ctx.globalAlpha = a;
+    ctx.fillRect(0, y1, W, y0 - y1);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// El girasol grande: no se mueve, solo crece. Zoom "logarítmico" = ritmo parejo al scrollear.
+function drawHero(fieldT) {
+  const r0 = CONFIG.heroStart * base;
+  const r1 = CONFIG.heroEnd * base;
+  const rPx = r0 * Math.pow(r1 / r0, fieldT);
+  const s = rPx / HERO_R;
+
+  const glow = ctx.createRadialGradient(cx, horizon, rPx * .3, cx, horizon, rPx * 1.6);
+  glow.addColorStop(0, 'rgba(255, 190, 60, .30)');
+  glow.addColorStop(1, 'rgba(255, 150, 30, 0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+
+  drawSprite(heroSprite, cx, horizon, s, 1);
+  ctx.globalAlpha = 1;
+}
+
+/* Proyección en perspectiva, la fórmula central de todo:
+     s = F / distancia        → cuántos píxeles mide una unidad del mundo
+     pantallaX = cx + x * s
+     suelo_Y  = horizonte + alturaCámara * s
+   Cuando la cámara avanza, "distancia" baja, "s" sube, y la flor crece. */
+function drawField(camZ) {
+  const { far, near, nearFade, camHeight } = CONFIG;
+  for (const f of flowers) {
+    const dz = f.z - camZ;
+    if (dz > far) continue;         // todavía muy lejos
+    if (dz < near) break;           // ya la pasamos (y las que siguen, también)
+
+    const alpha = clamp((far - dz) / (far * .25), 0, 1)      // aparece suave desde el horizonte
+                * clamp((dz - near) / (nearFade - near), 0, 1); // se vuelve translúcida al pasar cerca
+    const spr = SPRITES[f.v];
+    const s = F / dz;
+    const s2 = s * f.sc;
+    const headX = cx + f.x * s * xSqueeze;
+    const groundY = horizon + camHeight * s;
+    const headY = groundY - spr.stemLen * s2;
+    drawSprite(spr, headX, headY, s2, alpha);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawParticles(t) {
+  const gh = H - horizon;
+  for (const p of particles) {
+    const fy = ((p.y - t * p.sp) % 1 + 1) % 1;
+    const py = horizon + fy * gh;
+    const px = p.x * W + Math.sin(t * .3 + p.ph) * 12;
+    const a = (.15 + .35 * (.5 + .5 * Math.sin(t * 1.2 + p.ph))) * fy;
+    ctx.fillStyle = `rgba(255, 220, 150, ${a.toFixed(3)})`;
+    ctx.beginPath(); ctx.arc(px, py, p.r, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function render(progress, time) {
+  const fieldT = clamp(progress / CONFIG.fieldEnd, 0, 1);   // 0→1 a lo largo del campo
+  const camZ = fieldT * CONFIG.travel;                      // dónde está la cámara
+
+  ctx.globalAlpha = 1;
+  ctx.drawImage(bg, 0, 0, W, H);
+  drawGroundBands(camZ);
+  drawHero(fieldT);            // primero el grande (queda atrás)…
+  drawField(camZ);             // …después las demás, de lejos a cerca
+  drawParticles(time);
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, W, H);
+
+  // Elementos HTML que dependen del progreso
+  const a = smoothstep(CONFIG.cardStart, CONFIG.cardEnd, progress);
+  card.style.opacity = a;
+  card.style.setProperty('--dy', ((1 - a) * 16).toFixed(1) + 'px');
+  hint.style.opacity = 1 - clamp(progress / .03, 0, 1);
+}
+
+/* =====================================================================
+   8. BUCLE PRINCIPAL
+   El scroll solo define un número (progress, de 0 a 1). Toda la escena es
+   una función de ese número, por eso al volver a 0 vuelve al inicio exacto.
+   ===================================================================== */
+let smooth = 0;
+let last = performance.now();
+
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, .05);
+  last = now;
+
+  const max = document.documentElement.scrollHeight - window.innerHeight;
+  const target = max > 0 ? clamp(window.scrollY / max, 0, 1) : 0;
+
+  // Suavizado: el progreso "persigue" al scroll real en vez de saltar
+  smooth += (target - smooth) * (1 - Math.exp(-dt * CONFIG.smoothing));
+  if (Math.abs(target - smooth) < 1e-5) smooth = target;
+
+  render(smooth, now / 1000);
+  requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
